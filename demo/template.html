@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xdb.js: the developer experience</title>
+<style>
+  :root {
+    --fg: #1b1b1b; --muted: #6b6b6b; --line: #e4e4e4; --code: #f6f6f6;
+    --accent: #0b5fff; --ok: #0a7f4f; --bad: #c0392b; --bg: #fff; --panel: #fafafa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6e6e6; --muted: #9a9a9a; --line: #2e2e2e; --code: #151515;
+      --accent: #6ea0ff; --ok: #48c78e; --bad: #ff6b6b; --bg: #0f0f0f; --panel: #141414;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  code, pre, textarea, .mono { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  a { color: var(--accent); }
+
+  header { border-bottom: 1px solid var(--line); padding: 1.5rem 1.5rem 1.25rem; }
+  header h1 { margin: 0; font-size: 1.5rem; }
+  header p { margin: .35rem 0 0; color: var(--muted); }
+  .actions { margin-top: .9rem; display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+
+  button {
+    font: inherit; font-size: .9rem; padding: .35rem .85rem; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg);
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.run { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ghost { background: transparent; }
+
+  .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 0; align-items: start; }
+  @media (max-width: 1000px) { .wrap { grid-template-columns: minmax(0, 1fr); } }
+
+  main { padding: 1.5rem; min-width: 0; }
+  #toc { display: flex; flex-wrap: wrap; gap: .4rem 1rem; margin-bottom: 1.5rem; font-size: .85rem; }
+
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem 1.1rem; margin-bottom: 1.25rem; }
+  .card-head { display: flex; align-items: baseline; gap: .6rem; }
+  .card-head h2 { margin: 0; font-size: 1.05rem; }
+  .num {
+    flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%; background: var(--code);
+    color: var(--muted); font-size: .8rem; display: grid; place-items: center;
+  }
+  .blurb { margin: .5rem 0 .8rem; color: var(--muted); font-size: .9rem; }
+
+  textarea.code {
+    width: 100%; resize: vertical; background: var(--code); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: .7rem .8rem; tab-size: 2;
+  }
+  .bar { display: flex; gap: .5rem; margin: .6rem 0; }
+  pre.out {
+    margin: 0; background: var(--code); border: 1px solid var(--line); border-left: 3px solid var(--ok);
+    border-radius: 6px; padding: .7rem .8rem; white-space: pre-wrap; overflow-x: auto;
+    min-height: 2.6rem; color: var(--fg);
+  }
+  pre.out.error { border-left-color: var(--bad); color: var(--bad); }
+
+  aside {
+    position: sticky; top: 0; max-height: 100vh; overflow-y: auto;
+    border-left: 1px solid var(--line); background: var(--panel); padding: 1.25rem 1rem;
+  }
+  @media (max-width: 1000px) { aside { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
+  aside h3 {
+    margin: 0 0 .5rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); display: flex; justify-content: space-between;
+  }
+  aside section { margin-bottom: 1.5rem; }
+  .empty { color: var(--muted); font-size: .85rem; margin: 0; }
+
+  table.tuples { width: 100%; border-collapse: collapse; font: 11.5px/1.45 ui-monospace, Menlo, monospace; }
+  table.tuples th {
+    text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line);
+    padding: .2rem .3rem; position: sticky; top: 0; background: var(--panel);
+  }
+  table.tuples td { padding: .15rem .3rem; vertical-align: top; border-bottom: 1px solid var(--line); }
+  table.tuples td.path { color: var(--muted); white-space: nowrap; }
+  table.tuples td.attr { white-space: nowrap; }
+  table.tuples td.val { word-break: break-word; }
+  table.tuples tr.sys td { opacity: .5; }
+
+  .live { border: 1px solid var(--line); border-radius: 6px; margin-bottom: .6rem; background: var(--bg); }
+  .live-head { display: flex; justify-content: space-between; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+  .live-name { font: 12px ui-monospace, Menlo, monospace; }
+  .badge { font-size: .7rem; color: var(--muted); }
+  pre.live-rows { margin: 0; padding: .4rem .5rem; white-space: pre-wrap; font-size: 11.5px; }
+
+  .event { display: flex; gap: .4rem; align-items: baseline; font-size: 11.5px; padding: .15rem 0; font-family: ui-monospace, Menlo, monospace; }
+  .tag { flex: none; border-radius: 3px; padding: 0 .3rem; font-size: 10px; text-transform: uppercase; }
+  .tag.put { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+  .tag.delete { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+  .uri { flex: none; }
+  .attrs { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ver { margin-left: auto; color: var(--muted); flex: none; }
+
+  footer { border-top: 1px solid var(--line); padding: 1.25rem 1.5rem; color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>xdb.js</h1>
+  <p>Think in tuples. Storage is a detail. Every example below runs the real library in this tab.</p>
+  <div class="actions">
+    <button id="run-all" class="run">Run every example</button>
+    <button id="reset-db" class="ghost">Reset the database</button>
+    <span class="blurb" style="margin:0">Edit any code cell and run it again. <code>xdb</code>, <code>z</code> and <code>S</code> are on <code>window</code>.</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <main>
+    <nav id="toc"></nav>
+    <div id="examples"></div>
+  </main>
+
+  <aside>
+    <section>
+      <h3><span>Tuples in the store</span><span id="tuple-count">0</span></h3>
+      <div id="tuples"></div>
+    </section>
+    <section>
+      <h3><span>Live queries</span></h3>
+      <div id="lives"></div>
+    </section>
+    <section>
+      <h3><span>Change events</span><span id="event-count">0</span></h3>
+      <div id="events"></div>
+    </section>
+  </aside>
+</div>
+
+<footer>
+  The data model, the URIs, the schema modes and the version contract follow the
+  Go library, so a record written by the XDB command line reads the same way here.
+  See <code>design.html</code> for the architecture and <code>README.md</code> to install it.
+</footer>
+
+<script>/*BUNDLE*/</script>
+</body>
+</html>

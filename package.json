@@ -1,0 +1,49 @@
+{
+  "name": "@xdb-dev/xdb",
+  "version": "0.0.0",
+  "description": "Think in tuples. The browser edition of XDB.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.19.0",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./idb": "./dist/drivers/idb.js",
+    "./memory": "./dist/drivers/memory.js",
+    "./sync": "./dist/sync/daemon.js",
+    "./react": "./dist/react/index.js",
+    "./storetest": "./dist/storetest/suite.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.demo.json",
+    "test": "vitest run",
+    "dx": "node scripts/build-dx.mjs",
+    "dx:check": "node scripts/build-dx.mjs && node scripts/check-dx.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm dx:check"
+  },
+  "peerDependencies": {
+    "zod": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^26.5.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^30.0.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0",
+    "zod": "^4.6.5"
+  }
+}
