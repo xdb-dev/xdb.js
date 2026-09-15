@@ -429,7 +429,8 @@ describe('TupleStore.tx', () => {
     expect(store.record('app/notes/n0')!.a).toBe(1)
   })
 
-  it('rolls back every mutation when the driver rejects at commit', async () => {
+  /** A memory driver whose second `apply` throws. Its `tx` runs `fn` against the wrapper, so the failure fires inside the transaction. */
+  function failSecondApply(): { driver: Driver; inner: Driver } {
     const inner = memory()
     let calls = 0
     const driver: Driver = {
@@ -439,7 +440,19 @@ describe('TupleStore.tx', () => {
         if (calls === 2) throw new Error('driver exploded')
         return inner.apply(m)
       },
+      tx: (fn) => inner.tx!(() => fn(driver)),
     }
+    return { driver, inner }
+  }
+
+  async function scanPaths(driver: Driver, scope: string): Promise<string[]> {
+    const paths: string[] = []
+    for await (const t of driver.scanTuples(scope)) paths.push(t.path)
+    return paths
+  }
+
+  it('rolls back every mutation when the driver rejects at commit', async () => {
+    const { driver, inner } = failSecondApply()
     const store = await TupleStore.open({ driver })
 
     await expect(
@@ -451,6 +464,22 @@ describe('TupleStore.tx', () => {
 
     expect(store.record('app/notes/n1')).toBeUndefined()
     expect(store.record('app/notes/n2')).toBeUndefined()
+    expect(await scanPaths(inner, 'app/notes')).toEqual([])
+  })
+
+  it('leaves no mutation of a multi-mutation apply in the driver when one driver write fails', async () => {
+    const { driver, inner } = failSecondApply()
+    const store = await TupleStore.open({ driver })
+
+    await expect(
+      store.apply([
+        { path: 'app/notes/n1', op: 'create', tuples: [{ path: 'app/notes/n1', attr: 'a', value: 1 }] },
+        { path: 'app/notes/n2', op: 'create', tuples: [{ path: 'app/notes/n2', attr: 'a', value: 1 }] },
+      ]),
+    ).rejects.toThrow('driver exploded')
+
+    expect(store.record('app/notes/n1')).toBeUndefined()
+    expect(await scanPaths(inner, 'app/notes')).toEqual([])
   })
 })
 

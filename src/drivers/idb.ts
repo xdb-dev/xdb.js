@@ -1,17 +1,16 @@
 /**
- * An IndexedDB driver for xdb.js. Stores tuples in one object store and
- * definitions in a second object store, inside one IndexedDB database.
+ * An IndexedDB driver for xdb.js. Stores one row per record in one object
+ * store and definitions in a second object store, inside one IndexedDB
+ * database.
  */
 
 import { alreadyExists, invalidURI, unsupported } from '../core/errors.js'
 import { parseURI, recordPath } from '../core/uri.js'
 import type { Def, Driver, Mutation, Tuple, TupleValue, ValueType } from '../core/types.js'
-import { valueKey } from '../core/value.js'
 
-const TUPLES_STORE = 'tuples'
+const RECORDS_STORE = 'records'
 const DEFS_STORE = 'defs'
 const NS_SCHEMA_INDEX = 'ns_schema'
-const VALUE_INDEX = 'ns_schema_attr_value'
 
 /** Options for {@link idb}. */
 export interface IDBOptions {
@@ -21,17 +20,22 @@ export interface IDBOptions {
   factory?: IDBFactory
 }
 
-/** The shape of one tuple record in the `tuples` object store. */
-interface StoredTuple {
-  path: string
-  attr: string
+/** The value, type, and items of one attribute of a stored record. */
+interface StoredAttr {
   value: TupleValue
   type?: ValueType
   items?: ValueType
+}
+
+/**
+ * The shape of one record row in the `records` object store. `attrs` is keyed
+ * by the dotted attribute name. A stored row always holds at least one attribute.
+ */
+interface StoredRecord {
+  path: string
   ns: string
   schema: string
-  id: string
-  valueKey: string
+  attrs: Map<string, StoredAttr>
 }
 
 /** The shape of one definition record in the `defs` object store. */
@@ -48,19 +52,31 @@ function splitRecordPath(path: string): { ns: string; schema: string; id: string
   return { ns, schema, id }
 }
 
-function toTuple(rec: StoredTuple): Tuple {
-  const t: Tuple = { path: rec.path, attr: rec.attr, value: rec.value }
-  if (rec.type !== undefined) t.type = rec.type
-  if (rec.items !== undefined) t.items = rec.items
+function toTuple(path: string, attr: string, a: StoredAttr): Tuple {
+  const t: Tuple = { path, attr, value: a.value }
+  if (a.type !== undefined) t.type = a.type
+  if (a.items !== undefined) t.items = a.items
   return t
 }
 
-function toStoredTuple(path: string, t: Tuple): StoredTuple {
-  const { ns, schema, id } = splitRecordPath(path)
-  const rec: StoredTuple = { path, attr: t.attr, value: t.value, ns, schema, id, valueKey: valueKey(t.value) }
-  if (t.type !== undefined) rec.type = t.type
-  if (t.items !== undefined) rec.items = t.items
-  return rec
+function toStoredAttr(t: Tuple): StoredAttr {
+  const a: StoredAttr = { value: t.value }
+  if (t.type !== undefined) a.type = t.type
+  if (t.items !== undefined) a.items = t.items
+  return a
+}
+
+function rowToTuples(row: StoredRecord): Tuple[] {
+  const out: Tuple[] = []
+  for (const [attr, a] of row.attrs) out.push(toTuple(row.path, attr, a))
+  return out
+}
+
+function tuplesToRow(path: string, tuples: Tuple[]): StoredRecord {
+  const { ns, schema } = splitRecordPath(path)
+  const row: StoredRecord = { path, ns, schema, attrs: new Map() }
+  for (const t of tuples) row.attrs.set(t.attr, toStoredAttr(t))
+  return row
 }
 
 function toDef(rec: StoredDef): Def {
@@ -87,65 +103,42 @@ function txDone(tx: IDBTransaction): Promise<void> {
   })
 }
 
-function collectCursor<T>(source: IDBObjectStore | IDBIndex, range: IDBKeyRange): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const out: T[] = []
-    const req = source.openCursor(range)
-    req.onsuccess = () => {
-      const cursor = req.result
-      if (!cursor) {
-        resolve(out)
-        return
-      }
-      out.push(cursor.value as T)
-      cursor.continue()
-    }
-    req.onerror = () => reject(req.error)
-  })
+async function getRow(store: IDBObjectStore, path: string): Promise<StoredRecord | undefined> {
+  return (await reqPromise(store.get(path))) as StoredRecord | undefined
 }
 
-/**
- * The key range covering every tuple of one record. The empty array upper
- * sentinel is always greater than any string, per IndexedDB key ordering, so
- * it bounds the attr component regardless of its content.
- */
-function recordKeyRange(path: string): IDBKeyRange {
-  return IDBKeyRange.bound([path], [path, []])
-}
-
-async function getRecordTuples(store: IDBObjectStore, path: string): Promise<StoredTuple[]> {
-  return collectCursor<StoredTuple>(store, recordKeyRange(path))
-}
-
-async function putStoredTuple(store: IDBObjectStore, path: string, t: Tuple): Promise<void> {
-  await reqPromise(store.put(toStoredTuple(path, t)))
+/** Writes `row`, or deletes it when it holds no attributes. */
+async function writeRow(store: IDBObjectStore, row: StoredRecord): Promise<void> {
+  if (row.attrs.size === 0) await reqPromise(store.delete(row.path))
+  else await reqPromise(store.put(row))
 }
 
 /** Applies one mutation to `store`, following the four-op table. */
 async function applyMutation(store: IDBObjectStore, m: Mutation): Promise<void> {
   switch (m.op) {
     case 'create': {
-      const existing = await getRecordTuples(store, m.path)
-      if (existing.length > 0) throw alreadyExists(`"${m.path}" already exists`, { uri: m.path })
-      for (const t of m.tuples ?? []) await putStoredTuple(store, m.path, t)
+      if (await getRow(store, m.path)) throw alreadyExists(`"${m.path}" already exists`, { uri: m.path })
+      await writeRow(store, tuplesToRow(m.path, m.tuples ?? []))
       return
     }
     case 'put': {
-      const existing = await getRecordTuples(store, m.path)
-      for (const old of existing) await reqPromise(store.delete([m.path, old.attr]))
-      for (const t of m.tuples ?? []) await putStoredTuple(store, m.path, t)
+      await writeRow(store, tuplesToRow(m.path, m.tuples ?? []))
       return
     }
     case 'patch': {
-      for (const t of m.tuples ?? []) await putStoredTuple(store, m.path, t)
+      const row = (await getRow(store, m.path)) ?? tuplesToRow(m.path, [])
+      for (const t of m.tuples ?? []) row.attrs.set(t.attr, toStoredAttr(t))
+      await writeRow(store, row)
       return
     }
     case 'delete': {
       if (m.attrs && m.attrs.length > 0) {
-        for (const attr of m.attrs) await reqPromise(store.delete([m.path, attr]))
+        const row = await getRow(store, m.path)
+        if (!row) return
+        for (const attr of m.attrs) row.attrs.delete(attr)
+        await writeRow(store, row)
       } else {
-        const existing = await getRecordTuples(store, m.path)
-        for (const old of existing) await reqPromise(store.delete([m.path, old.attr]))
+        await reqPromise(store.delete(m.path))
       }
       return
     }
@@ -154,21 +147,21 @@ async function applyMutation(store: IDBObjectStore, m: Mutation): Promise<void> 
   }
 }
 
-/** Collects the tuple rows of a scan scope: `ns`, `ns/schema`, or `ns/schema/id`. */
-async function collectScopeRows(store: IDBObjectStore, scope: string): Promise<StoredTuple[]> {
+/** Collects the record rows of a scan scope: `ns`, `ns/schema`, or `ns/schema/id`. */
+async function collectScopeRows(store: IDBObjectStore, scope: string): Promise<StoredRecord[]> {
   const parts = scope.split('/')
   if (parts.length === 3) {
-    return getRecordTuples(store, parts.join('/'))
+    const row = await getRow(store, parts.join('/'))
+    return row ? [row] : []
   }
+  const index = store.index(NS_SCHEMA_INDEX)
   if (parts.length === 2) {
     const [ns, schema] = parts as [string, string]
-    const index = store.index(NS_SCHEMA_INDEX)
-    return collectCursor<StoredTuple>(index, IDBKeyRange.only([ns, schema]))
+    return (await reqPromise(index.getAll(IDBKeyRange.only([ns, schema])))) as StoredRecord[]
   }
   if (parts.length === 1) {
     const [ns] = parts as [string]
-    const index = store.index(NS_SCHEMA_INDEX)
-    return collectCursor<StoredTuple>(index, IDBKeyRange.bound([ns], [ns, []]))
+    return (await reqPromise(index.getAll(IDBKeyRange.bound([ns], [ns, []])))) as StoredRecord[]
   }
   throw invalidURI(`"${scope}" is not a valid scope`)
 }
@@ -181,7 +174,7 @@ async function collectDefScopeRows(store: IDBObjectStore, scope: string): Promis
 
 /** Runs a function against one object store, in its own transaction or a shared one. */
 interface StoreRunner {
-  tuples<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => Promise<T>): Promise<T>
+  records<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => Promise<T>): Promise<T>
   defs<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => Promise<T>): Promise<T>
 }
 
@@ -208,7 +201,7 @@ function topRunner(getDB: () => Promise<IDBDatabase>): StoreRunner {
     }
   }
   return {
-    tuples: (mode, fn) => run(TUPLES_STORE, mode, fn),
+    records: (mode, fn) => run(RECORDS_STORE, mode, fn),
     defs: (mode, fn) => run(DEFS_STORE, mode, fn),
   }
 }
@@ -216,7 +209,7 @@ function topRunner(getDB: () => Promise<IDBDatabase>): StoreRunner {
 /** A runner scoped to one already-open transaction, shared by both stores. */
 function scopedRunner(idbTx: IDBTransaction): StoreRunner {
   return {
-    tuples: (_mode, fn) => fn(idbTx.objectStore(TUPLES_STORE)),
+    records: (_mode, fn) => fn(idbTx.objectStore(RECORDS_STORE)),
     defs: (_mode, fn) => fn(idbTx.objectStore(DEFS_STORE)),
   }
 }
@@ -225,26 +218,28 @@ function scopedRunner(idbTx: IDBTransaction): StoreRunner {
 function buildDriverMethods(runner: StoreRunner): Omit<Driver, 'tx' | 'close'> {
   return {
     async getTuples(uris: string[]): Promise<Tuple[]> {
-      return runner.tuples('readonly', async (store) => {
+      return runner.records('readonly', async (store) => {
         const out: Tuple[] = []
+        const rows = new Map<string, StoredRecord | undefined>()
         for (const raw of uris) {
           const parsed = parseURI(raw)
           if (!parsed.attr) throw invalidURI(`"${raw}" is not an attribute URI`)
           const path = recordPath(parsed)
-          const rec = (await reqPromise(store.get([path, parsed.attr]))) as StoredTuple | undefined
-          if (rec) out.push(toTuple(rec))
+          if (!rows.has(path)) rows.set(path, await getRow(store, path))
+          const a = rows.get(path)?.attrs.get(parsed.attr)
+          if (a) out.push(toTuple(path, parsed.attr, a))
         }
         return out
       })
     },
 
     async *scanTuples(scope: string): AsyncGenerator<Tuple> {
-      const rows = await runner.tuples('readonly', (store) => collectScopeRows(store, scope))
-      for (const row of rows) yield toTuple(row)
+      const rows = await runner.records('readonly', (store) => collectScopeRows(store, scope))
+      for (const row of rows) yield* rowToTuples(row)
     },
 
     async apply(m: Mutation): Promise<void> {
-      await runner.tuples('readwrite', (store) => applyMutation(store, m))
+      await runner.records('readwrite', (store) => applyMutation(store, m))
     },
 
     async getSchema(path: string): Promise<Def | null> {
@@ -279,10 +274,10 @@ function buildDriverMethods(runner: StoreRunner): Omit<Driver, 'tx' | 'close'> {
 
     async dropRecords(path: string): Promise<void> {
       const [ns, schema] = path.split('/') as [string, string]
-      await runner.tuples('readwrite', async (store) => {
+      await runner.records('readwrite', async (store) => {
         const index = store.index(NS_SCHEMA_INDEX)
-        const rows = await collectCursor<StoredTuple>(index, IDBKeyRange.only([ns, schema]))
-        for (const row of rows) await reqPromise(store.delete([row.path, row.attr]))
+        const keys = await reqPromise(index.getAllKeys(IDBKeyRange.only([ns, schema])))
+        for (const key of keys) await reqPromise(store.delete(key))
       })
     },
   }
@@ -293,10 +288,9 @@ function openDatabase(name: string, factory: IDBFactory): Promise<IDBDatabase> {
     const req = factory.open(name, 1)
     req.onupgradeneeded = () => {
       const db = req.result
-      if (!db.objectStoreNames.contains(TUPLES_STORE)) {
-        const tuples = db.createObjectStore(TUPLES_STORE, { keyPath: ['path', 'attr'] })
-        tuples.createIndex(NS_SCHEMA_INDEX, ['ns', 'schema'])
-        tuples.createIndex(VALUE_INDEX, ['ns', 'schema', 'attr', 'valueKey'])
+      if (!db.objectStoreNames.contains(RECORDS_STORE)) {
+        const records = db.createObjectStore(RECORDS_STORE, { keyPath: 'path' })
+        records.createIndex(NS_SCHEMA_INDEX, ['ns', 'schema'])
       }
       if (!db.objectStoreNames.contains(DEFS_STORE)) {
         db.createObjectStore(DEFS_STORE, { keyPath: 'path' })
@@ -309,9 +303,9 @@ function openDatabase(name: string, factory: IDBFactory): Promise<IDBDatabase> {
 }
 
 /**
- * An IndexedDB driver. One object store holds tuples, keyed by `[path, attr]`,
- * with indexes on `[ns, schema]` and on `[ns, schema, attr, valueKey]`. A
- * second object store holds definitions verbatim, keyed by `ns/schema`.
+ * An IndexedDB driver. One object store holds one row per record, keyed by
+ * `path`, with an index on `[ns, schema]`. A second object store holds
+ * definitions verbatim, keyed by `ns/schema`.
  *
  * `apply` runs each mutation inside one IndexedDB transaction, so a `create`
  * on an existing path and a concurrent `create` race both resolve correctly:
@@ -333,7 +327,7 @@ export function idb(name: string, opts: IDBOptions = {}): Driver {
 
     async tx(fn: (t: Driver) => Promise<void>): Promise<void> {
       const db = await getDB()
-      const idbTx = db.transaction([TUPLES_STORE, DEFS_STORE], 'readwrite')
+      const idbTx = db.transaction([RECORDS_STORE, DEFS_STORE], 'readwrite')
       const scoped: Driver = buildDriverMethods(scopedRunner(idbTx))
       try {
         await fn(scoped)

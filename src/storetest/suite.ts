@@ -153,6 +153,26 @@ export function runDriverSuite(name: string, make: () => Driver | Promise<Driver
         const tuples = await collectScan(driver, path)
         expect(tuples.map((t) => t.attr)).toEqual(['b'])
       })
+
+      it('delete of the last attribute removes the record, so create succeeds again', async () => {
+        const path = `ns/sch/${uid()}`
+        await driver.apply({ path, op: 'create', tuples: [{ path, attr: 'a', value: 1 }] })
+        await driver.apply({ path, op: 'delete', attrs: ['a'] })
+        expect((await collectScan(driver, path)).length).toBe(0)
+        await driver.apply({ path, op: 'create', tuples: [{ path, attr: 'b', value: 2 }] })
+        const tuples = await collectScan(driver, path)
+        expect(tuples.map((t) => t.attr)).toEqual(['b'])
+      })
+
+      it('put with an empty tuple set removes the record', async () => {
+        const path = `ns/sch/${uid()}`
+        await driver.apply({ path, op: 'create', tuples: [{ path, attr: 'a', value: 1 }] })
+        await driver.apply({ path, op: 'put', tuples: [] })
+        expect((await collectScan(driver, path)).length).toBe(0)
+        await expect(
+          driver.apply({ path, op: 'create', tuples: [{ path, attr: 'b', value: 2 }] }),
+        ).resolves.toBeUndefined()
+      })
     })
 
     it('resolves a 16-way concurrent create race to exactly one winner', async () => {

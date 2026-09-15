@@ -298,10 +298,7 @@ export class TupleStore {
     this.bus.publish(changes, events)
     return this.enqueue(async () => {
       try {
-        // A dynamic-mode write that added a field must persist the new
-        // definition, or a reopened store loses the inferred type.
-        for (const def of evolvedDefs) await this.driver.putSchema(def)
-        for (const op of driverOps) await this.driver.apply(op)
+        await this.persist(evolvedDefs, driverOps)
       } catch (err) {
         undo()
         this.bus.publish(
@@ -417,13 +414,14 @@ export class TupleStore {
    * Runs `fn` with this store. Every `apply` that `fn` makes is staged
    * against the index immediately, so reads inside `fn` see prior writes in
    * the same transaction, but the driver write and the bus publish are
-   * deferred until `fn` returns. The whole batch commits as one driver write
-   * sequence and one publish, so a live query reruns once for the
-   * transaction, not once per mutation inside it.
+   * deferred until `fn` returns. The whole batch commits as one publish and,
+   * when the driver implements `tx`, one driver transaction. As a result, a
+   * live query reruns once for the transaction, not once per mutation inside it.
    *
    * If `fn` throws, or the deferred driver write fails, every mutation
    * staged during the transaction is rolled back from the index. A failed
-   * driver write also publishes the reversal, matching `apply`.
+   * driver write also publishes the reversal, matching `apply`. If the driver
+   * implements `tx`, a failed driver write also leaves none of the batch on disk.
    */
   async tx(fn: (t: TupleStore) => void | Promise<void>): Promise<void> {
     if (this.txBuffer) throw unsupported('nested transactions are not supported')
@@ -442,8 +440,7 @@ export class TupleStore {
     this.bus.publish(buf.changes, buf.events)
     return this.enqueue(async () => {
       try {
-        for (const def of buf.evolvedDefs) await this.driver.putSchema(def)
-        for (const op of buf.driverOps) await this.driver.apply(op)
+        await this.persist(buf.evolvedDefs, buf.driverOps)
       } catch (err) {
         for (let i = buf.undos.length - 1; i >= 0; i--) buf.undos[i]!()
         this.bus.publish(
@@ -453,6 +450,26 @@ export class TupleStore {
         throw err
       }
     })
+  }
+
+  /**
+   * Writes a batch to the driver. When the batch has more than one write and
+   * the driver implements `tx`, the batch runs in one driver transaction, so
+   * a failed write leaves none of the batch on disk. A single write needs no
+   * transaction: `Driver.apply` is atomic.
+   */
+  private async persist(evolvedDefs: Def[], driverOps: Mutation[]): Promise<void> {
+    const write = async (d: Driver): Promise<void> => {
+      // A dynamic-mode write that added a field must persist the new
+      // definition, or a reopened store loses the inferred type.
+      for (const def of evolvedDefs) await d.putSchema(def)
+      for (const op of driverOps) await d.apply(op)
+    }
+    if (this.driver.tx && evolvedDefs.length + driverOps.length > 1) {
+      await this.driver.tx(write)
+    } else {
+      await write(this.driver)
+    }
   }
 
   /** Closes the underlying driver, when it has a `close` method. */
